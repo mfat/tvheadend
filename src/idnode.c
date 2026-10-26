@@ -92,6 +92,34 @@ idnode_root_class(const idclass_t *idc)
 }
 
 /**
+ * Find a node of the class's root class with the same short uuid.
+ *
+ * The short uuid is the first four bytes of the uuid without one bit,
+ * and the domain is sorted by uuid, so each of the two prefixes that
+ * give it is a single lookup instead of a walk over every node.
+ */
+static idnode_t *
+idnode_find_short_uuid(const idclass_t *class, uint32_t u32)
+{
+  idnodes_rb_t *domain = idclass_find_domain(class);
+  idnode_t skel, *c;
+  uint32_t prefix;
+  int i;
+
+  if (domain == NULL)
+    return NULL;
+  for (i = 0; i < 2; i++) {
+    prefix = i ? u32 | 0x80000000 : u32;
+    memset(&skel.in_uuid, 0, sizeof(skel.in_uuid));
+    memcpy(skel.in_uuid.bin, &prefix, sizeof(prefix));
+    c = RB_FIND_GE(domain, &skel, in_domain_link, in_cmp);
+    if (c && idnode_get_short_uuid(c) == u32)
+      return c;
+  }
+  return NULL;
+}
+
+/**
  *
  */
 int
@@ -100,8 +128,6 @@ idnode_insert(idnode_t *in, const char *uuid, const idclass_t *class, int flags)
   idnode_t *c;
   tvh_uuid_t u;
   int retries = 5;
-  uint32_t u32;
-  const idclass_t *idc;
   char ubuf[UUID_HEX_SIZE];
 
   lock_assert(&global_lock);
@@ -119,16 +145,8 @@ idnode_insert(idnode_t *in, const char *uuid, const idclass_t *class, int flags)
     uuid_duplicate(&in->in_uuid, &u);
 
     c = NULL;
-    if (flags & IDNODE_SHORT_UUID) {
-      u32 = idnode_get_short_uuid(in);
-      idc = idnode_root_class(in->in_class);
-      RB_FOREACH(c, &idnodes, in_link) {
-        if (idc != idnode_root_class(c->in_class))
-          continue;
-        if (idnode_get_short_uuid(c) == u32)
-          break;
-      }
-    }
+    if (flags & IDNODE_SHORT_UUID)
+      c = idnode_find_short_uuid(class, idnode_get_short_uuid(in));
 
     if (c == NULL)
       c = RB_INSERT_SORTED(&idnodes, in, in_link, in_cmp);
@@ -1662,19 +1680,26 @@ idnode_list_link ( idnode_t *in1, idnode_list_head_t *in1_list,
                    idnode_t *in2, idnode_list_head_t *in2_list,
                    void *origin, uint32_t savemask )
 {
-  idnode_list_mapping_t *ilm;
+  idnode_list_mapping_t *ilm, *ilm1, *ilm2;
 
-  /* Already linked */
-  LIST_FOREACH(ilm, in1_list, ilm_in1_link)
-    if (ilm->ilm_in2 == in2) {
+  /* Already linked: a link is on both lists, so walk them together
+   * and stop at the end of the shorter one. A tag can hold tens of
+   * thousands of channels while a channel has a few tags. */
+  ilm1 = LIST_FIRST(in1_list);
+  ilm2 = LIST_FIRST(in2_list);
+  while (ilm1 && ilm2) {
+    ilm = NULL;
+    if (ilm1->ilm_in2 == in2)
+      ilm = ilm1;
+    else if (ilm2->ilm_in1 == in1)
+      ilm = ilm2;
+    if (ilm) {
       ilm->ilm_mark = 0;
       return NULL;
     }
-  LIST_FOREACH(ilm, in2_list, ilm_in2_link)
-    if (ilm->ilm_in1 == in1) {
-      ilm->ilm_mark = 0;
-      return NULL;
-    }
+    ilm1 = LIST_NEXT(ilm1, ilm_in1_link);
+    ilm2 = LIST_NEXT(ilm2, ilm_in2_link);
+  }
 
   /* Link */
   ilm = calloc(1, sizeof(idnode_list_mapping_t));
