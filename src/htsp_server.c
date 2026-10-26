@@ -71,6 +71,7 @@ TAILQ_HEAD(htsp_msg_queue, htsp_msg);
 TAILQ_HEAD(htsp_msg_q_queue, htsp_msg_q);
 
 static struct htsp_connection_list htsp_async_connections;
+static mtimer_t htsp_tag_members_timer;
 static struct htsp_connection_list htsp_connections;
 
 static void htsp_streaming_input(void *opaque, streaming_message_t *sm);
@@ -3730,6 +3731,7 @@ void
 htsp_done(void)
 {
   tvh_mutex_lock(&global_lock);
+  mtimer_disarm(&htsp_tag_members_timer);
   if (htsp_server_2)
     tcp_server_delete(htsp_server_2);
   if (htsp_server)
@@ -3877,6 +3879,38 @@ htsp_tag_update(channel_tag_t *ct)
     htsp_async_send_cb(htsp_tag_update_msg, HTSP_ASYNC_ON, ct);
   else // in case the tag was ever sent to the client
     htsp_tag_delete(ct);
+}
+
+static void
+htsp_tag_members_send(void *aux)
+{
+  channel_tag_t *ct;
+
+  TAILQ_FOREACH(ct, &channel_tags, ct_link)
+    if (ct->ct_htsp_members_pending) {
+      ct->ct_htsp_members_pending = 0;
+      htsp_tag_update(ct);
+    }
+}
+
+/**
+ * Called from channel.c when a channel joins or leaves an exported tag.
+ *
+ * Each tagUpdate lists every member, so mapping a bouquet of tens of
+ * thousands of channels would send that list once per channel. Send
+ * each changed tag once instead, after the changes.
+ */
+void
+htsp_tag_members_update(channel_tag_t *ct)
+{
+  if (!ct->ct_enabled || ct->ct_internal) {
+    htsp_tag_update(ct);
+    return;
+  }
+  if (!ct->ct_htsp_members_pending) {
+    ct->ct_htsp_members_pending = 1;
+    mtimer_arm_rel(&htsp_tag_members_timer, htsp_tag_members_send, NULL, ms2mono(200));
+  }
 }
 
 

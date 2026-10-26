@@ -114,6 +114,7 @@ typedef struct channel_tag {
   idnode_list_head_t ct_accesses;
 
   int ct_htsp_id;
+  int ct_htsp_members_pending;
 
 } channel_tag_t;
 

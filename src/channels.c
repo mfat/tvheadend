@@ -1530,7 +1530,7 @@ channel_tag_map(channel_tag_t *ct, channel_t *ch, void *origin)
                          origin, 2);
   if (ilm) {
     if(ct->ct_enabled && !ct->ct_internal) {
-      htsp_tag_update(ct);
+      htsp_tag_members_update(ct);
       htsp_channel_update(ch);
     }
     return 1;
@@ -1552,7 +1552,7 @@ channel_tag_mapping_destroy(idnode_list_mapping_t *ilm, void *origin)
 
   if(ct->ct_enabled && !ct->ct_internal) {
     if(origin == ch)
-      htsp_tag_update(ct);
+      htsp_tag_members_update(ct);
     if(origin == ct)
       htsp_channel_update(ch);
   }
