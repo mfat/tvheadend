@@ -1955,6 +1955,28 @@ idnode_notify_title_changed_lang (void *in, const char *lang)
  * Save thread
  * *************************************************************************/
 
+/* Called with global_lock held; drops it while each file is written. */
+static void
+idnode_save_drain ( void )
+{
+  idnode_save_t *ise;
+  htsmsg_t *m;
+  char filename[PATH_MAX];
+
+  while ((ise = TAILQ_FIRST(&idnodes_save)) != NULL) {
+    m = idnode_savefn(ise->ise_node, filename, sizeof(filename));
+    ise->ise_node->in_save = NULL;
+    TAILQ_REMOVE(&idnodes_save, ise, ise_link);
+    tvh_mutex_unlock(&global_lock);
+    free(ise);
+    if (m) {
+      hts_settings_save(m, "%s", filename);
+      htsmsg_destroy(m);
+    }
+    tvh_mutex_lock(&global_lock);
+  }
+}
+
 static void *
 save_thread ( void *aux )
 {
@@ -2032,21 +2054,22 @@ lnotifygo:
 
   mtimer_disarm(&save_timer);
 
-  while ((ise = TAILQ_FIRST(&idnodes_save)) != NULL) {
-    m = idnode_savefn(ise->ise_node, filename, sizeof(filename));
-    ise->ise_node->in_save = NULL;
-    TAILQ_REMOVE(&idnodes_save, ise, ise_link);
-    tvh_mutex_unlock(&global_lock);
-    free(ise);
-    if (m) {
-      hts_settings_save(m, "%s", filename);
-      htsmsg_destroy(m);
-    }
-    tvh_mutex_lock(&global_lock);
-  }
+  idnode_save_drain();
 
   tvh_mutex_unlock(&global_lock);
   return NULL;
+}
+
+/*
+ * Write every queued save now. Shutdown calls this before it tears
+ * down services: a channel saved after that loses its services.
+ */
+void
+idnode_save_flush(void)
+{
+  tvh_mutex_lock(&global_lock);
+  idnode_save_drain();
+  tvh_mutex_unlock(&global_lock);
 }
 
 /* **************************************************************************

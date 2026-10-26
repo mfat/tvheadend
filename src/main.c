@@ -1415,6 +1415,8 @@ main(int argc, char **argv)
 #endif
   tvh_mutex_unlock(&global_lock);
 
+  // Save pending changes while channels still link to their services.
+  tvhftrace(LS_MAIN, idnode_save_flush);
   tvhftrace(LS_MAIN, epggrab_done);
 #if ENABLE_MPEGTS
   tvhftrace(LS_MAIN, mpegts_done);

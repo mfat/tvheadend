@@ -211,6 +211,7 @@ extern tvh_mutex_t idnode_mutex;
 void idnode_boot(void);
 void idnode_init(void);
 void idnode_done(void);
+void idnode_save_flush(void);
 
 static inline void idnode_lock(void)
   { tvh_mutex_lock(&idnode_mutex); }
