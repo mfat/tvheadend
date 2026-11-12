@@ -1046,11 +1046,26 @@ idnode_set_add
   if (is->is_alloc == is->is_count)
     idnode_set_alloc(is, MAX(100, is->is_alloc * 2));
   if (is->is_sorted) {
-    size_t i;
+    size_t first = 0, last = is->is_count, mid;
     idnode_t **a = is->is_array;
-    for (i = is->is_count++; i > 0 && a[i - 1] > in; i--)
-      a[i] = a[i - 1];
-    a[i] = in;
+
+    /* Find the upper bound, preserving the order of equal entries.
+     * Large bouquets otherwise compare and copy every displaced pointer. */
+    if (last && a[last - 1] > in) {
+      while (first < last) {
+        mid = first + (last - first) / 2;
+        if (a[mid] <= in)
+          first = mid + 1;
+        else
+          last = mid;
+      }
+      memmove(a + first + 1, a + first,
+              (is->is_count - first) * sizeof(*a));
+    } else {
+      first = last;
+    }
+    a[first] = in;
+    is->is_count++;
   } else {
     is->is_array[is->is_count++] = in;
   }
