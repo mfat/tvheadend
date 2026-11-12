@@ -175,7 +175,10 @@ htsmsg_field_find(const htsmsg_t *msg, const char *name)
   if (msg == NULL || name == NULL)
     return NULL;
   TAILQ_FOREACH(f, &msg->hm_fields, hmf_link) {
-    if(!strcmp(htsmsg_field_name(f), name))
+    /* Reject a different first byte before calling strcmp. Field lookup
+     * is a hot path in configuration loading and EPG restoration. */
+    const char *field_name = htsmsg_field_name(f);
+    if (field_name[0] == name[0] && !strcmp(field_name, name))
       return f;
   }
   return NULL;
