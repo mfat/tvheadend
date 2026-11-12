@@ -218,7 +218,7 @@ hts_settings_save(htsmsg_t *record, const char *pathfmt, ...)
  *
  */
 static htsmsg_t *
-hts_settings_load_one(const char *filename)
+hts_settings_load_one(const char *filename, const fb_dir *dir, const char *name)
 {
   ssize_t n, size;
   char *mem;
@@ -226,7 +226,8 @@ hts_settings_load_one(const char *filename)
   htsmsg_t *r = NULL;
 
   /* Open */
-  if (!(fp = fb_open(filename, 1, 0))) return NULL;
+  fp = dir ? fb_open2(dir, name, 1, 0) : fb_open(filename, 1, 0);
+  if (!fp) return NULL;
   size = fb_size(fp);
 
   /* Load data */
@@ -277,6 +278,7 @@ hts_settings_load_path(const char *fullpath, int depth)
   const char *name;
   struct filebundle_stat st;
   fb_dirent **namelist, *d;
+  fb_dir *dir;
   htsmsg_t *r, *c;
   int n, i;
 
@@ -286,9 +288,14 @@ hts_settings_load_path(const char *fullpath, int depth)
   /* Directory */
   if (st.is_dir) {
 
-    /* Get file list */
-    if((n = fb_scandir(fullpath, &namelist)) < 0)
+    /* Reuse the directory for all children instead of opening it again
+     * for every settings file. Keep filebundle fallback semantics. */
+    if (!(dir = fb_opendir(fullpath)))
       return NULL;
+    if ((n = fb_scandir(fullpath, &namelist)) < 0) {
+      fb_closedir(dir);
+      return NULL;
+    }
 
     /* Read files */
     r = htsmsg_create_map();
@@ -301,7 +308,7 @@ hts_settings_load_path(const char *fullpath, int depth)
         if(d->type == FB_DIR && depth > 0) {
           c = hts_settings_load_path(child, depth - 1);
         } else {
-          c = hts_settings_load_one(child);
+          c = hts_settings_load_one(child, dir, d->name);
         }
         if(c != NULL)
           htsmsg_add_msg(r, d->name, c);
@@ -310,10 +317,11 @@ hts_settings_load_path(const char *fullpath, int depth)
       free(d);
     }
     free(namelist);
+    fb_closedir(dir);
 
   /* File */
   } else {
-    r = hts_settings_load_one(fullpath);
+    r = hts_settings_load_one(fullpath, NULL, NULL);
   }
 
   return r;
