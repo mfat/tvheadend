@@ -1315,6 +1315,8 @@ iptv_input_thread_manage_cb(void *aux)
 
 void iptv_init ( void )
 {
+  int64_t t0 = getmonoclock();
+
   TAILQ_INIT(&iptv_tpool);
   tvh_mutex_init(&iptv_lock, NULL);
 
@@ -1330,9 +1332,14 @@ void iptv_init ( void )
 
   /* Init Network */
   iptv_network_init();
+  tvhtrace(LS_MAIN, "startup iptv_network_init: %"PRId64" ms",
+          mono2ms(getmonoclock() - t0));
 
   /* Threads init */
+  t0 = getmonoclock();
   iptv_input_thread_manage(iptv_tpool_safe_count(), 0);
+  tvhtrace(LS_MAIN, "startup iptv threads: %"PRId64" ms (%d thread(s))",
+          mono2ms(getmonoclock() - t0), iptv_tpool_count);
   tvhinfo(LS_IPTV, "Using %d input thread(s)", iptv_tpool_count);
 }
 

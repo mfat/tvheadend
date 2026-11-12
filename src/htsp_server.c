@@ -1704,14 +1704,19 @@ htsp_method_async(htsp_connection_t *htsp, htsmsg_t *in)
   htsp->htsp_async_mode |= HTSP_ASYNC_ON;
 
   /* Send all enabled and external tags */
+  {
+  int64_t sync_at = getmonoclock();
+  int channels_sent = 0;
   TAILQ_FOREACH(ct, &channel_tags, ct_link)
     if(channel_tag_access(ct, htsp->htsp_granted_access, 0))
       htsp_send_message(htsp, htsp_build_tag(htsp, ct, "tagAdd", 0), NULL);
 
   /* Send all channels */
   CHANNEL_FOREACH(ch)
-    if (htsp_user_access_channel(htsp,ch))
+    if (htsp_user_access_channel(htsp,ch)) {
       htsp_send_message(htsp, htsp_build_channel(ch, "channelAdd", htsp), NULL);
+      channels_sent++;
+    }
 
   /* Send all enabled and external tags (now with channel mappings) */
   TAILQ_FOREACH(ct, &channel_tags, ct_link)
@@ -1736,6 +1741,10 @@ htsp_method_async(htsp_connection_t *htsp, htsmsg_t *in)
   /* Send EPG updates */
   if (epg)
     htsp_epg_send_waiting(htsp, -1);
+
+  tvhtrace(LS_MAIN, "startup initial metadata enqueue: %"PRId64" ms, %d channels",
+          mono2ms(getmonoclock() - sync_at), channels_sent);
+  }
 
   /* Notify that initial sync has been completed */
   m = htsmsg_create_map();

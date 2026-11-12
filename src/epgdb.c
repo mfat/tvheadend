@@ -127,6 +127,8 @@ void epg_init ( void )
   int ver = EPG_DB_VERSION;
   struct sigaction act, oldact;
   char *sect = NULL;
+  int profile = tvhtrace_enabled();
+  int64_t decode_us = 0, restore_us = 0, destroy_us = 0, profile_at;
 
   memoryinfo_register(&epg_memoryinfo_broadcasts);
 
@@ -179,10 +181,13 @@ void epg_init ( void )
   if (remain > 12 && memcmp(rp, "\xff\xffGZIP01", 8) == 0 &&
       (rp[7] == '0' || rp[7] == '1')) {
     uint32_t orig = (rp[8] << 24) | (rp[9] << 16) | (rp[10] << 8) | rp[11];
+    int64_t inflate_at = profile ? getmonoclock() : 0;
     tvhinfo(LS_EPGDB, "gzip format detected, inflating (ratio %.1f%% deflated size %zd)",
             ((remain * 100.0) / orig), remain);
     rp = zlib_mem = tvh_gzip_inflate(rp + 12, remain - 12, orig);
     remain = rp ? orig : 0;
+    tvhtrace(LS_MAIN, "startup epg inflate: %"PRId64" ms",
+            mono2ms(getmonoclock() - inflate_at));
   }
 #endif
 
@@ -190,12 +195,15 @@ void epg_init ( void )
 
   /* Process */
   memset(&stats, 0, sizeof(stats));
+  int64_t parse_at = profile ? getmonoclock() : 0;
   while ( remain > 4 ) {
 
     /* Get message length */
     size_t msglen = remain;
     htsmsg_t *m;
+    profile_at = profile ? getmonoclock() : 0;
     r = htsmsg_binary2_deserialize(&m, rp, &msglen, NULL);
+    if (profile) decode_us += getmonoclock() - profile_at;
 
     /* Safety check */
     if (r) {
@@ -211,6 +219,7 @@ void epg_init ( void )
     if (!m) continue;
 
     /* Process */
+    profile_at = profile ? getmonoclock() : 0;
     switch (ver) {
       case 3:
         _epgdb_v3_process(&sect, m, &stats);
@@ -219,10 +228,17 @@ void epg_init ( void )
         break;
     }
 
+    if (profile) restore_us += getmonoclock() - profile_at;
     /* Cleanup */
+    profile_at = profile ? getmonoclock() : 0;
     htsmsg_destroy(m);
+    if (profile) destroy_us += getmonoclock() - profile_at;
   }
+  tvhtrace(LS_MAIN, "startup epg parse: %"PRId64" ms",
+          mono2ms(getmonoclock() - parse_at));
 
+  tvhtrace(LS_MAIN, "startup epg decode/restore/destroy: %"PRId64"/%"PRId64"/%"PRId64" ms",
+           mono2ms(decode_us), mono2ms(restore_us), mono2ms(destroy_us));
   free(sect);
 
   if (!stats.config.total) {

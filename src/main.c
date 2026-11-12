@@ -1281,7 +1281,16 @@ main(int argc, char **argv)
 
   /**
    * Initialize subsystems
+   *
+   * TVH_STARTUP reports elapsed time only with main tracing enabled.
+   * It does not change what is loaded.
    */
+#define TVH_STARTUP(name, fcn, ...) do { \
+  int64_t _t0 = getmonoclock(); \
+  tvhftrace(LS_MAIN, fcn, ##__VA_ARGS__); \
+  tvhtrace(LS_MAIN, "startup %s: %"PRId64" ms", name, \
+          mono2ms(getmonoclock() - _t0)); \
+} while (0)
 
   epg_in_load = 1;
 
@@ -1317,15 +1326,15 @@ main(int argc, char **argv)
   tvhftrace(LS_MAIN, dvb_init);
 #if ENABLE_MPEGTS
 #if ENABLE_TSFILE || ENABLE_TSDEBUG
-  tvhftrace(LS_MAIN, mpegts_init, adapter_mask, opt_nosatipcli, &opt_satip_xml,
+  TVH_STARTUP("mpegts_init", mpegts_init, adapter_mask, opt_nosatipcli, &opt_satip_xml,
             &opt_tsfile, opt_tsfile_tuner);
 #else
-  tvhftrace(LS_MAIN, mpegts_init, adapter_mask, opt_nosatipcli, &opt_satip_xml,
+  TVH_STARTUP("mpegts_init", mpegts_init, adapter_mask, opt_nosatipcli, &opt_satip_xml,
             NULL, 0);
 #endif
 #endif
-  tvhftrace(LS_MAIN, channel_init);
-  tvhftrace(LS_MAIN, bouquet_service_resolve);
+  TVH_STARTUP("channel_init", channel_init);
+  TVH_STARTUP("bouquet_service_resolve", bouquet_service_resolve);
   tvhftrace(LS_MAIN, subscription_init);
   tvhftrace(LS_MAIN, dvr_config_init);
   tvhftrace(LS_MAIN, access_init, opt_firstrun, opt_noacl);
@@ -1338,13 +1347,14 @@ main(int argc, char **argv)
   tvhftrace(LS_MAIN, upnp_server_init, opt_bindaddr);
 #endif
   tvhftrace(LS_MAIN, service_mapper_init);
-  tvhftrace(LS_MAIN, epggrab_init);
-  tvhftrace(LS_MAIN, epg_init);
+  TVH_STARTUP("epggrab_init", epggrab_init);
+  TVH_STARTUP("epg_init", epg_init);
   tvhftrace(LS_MAIN, dvr_init);
   tvhftrace(LS_MAIN, dbus_server_start);
   tvhftrace(LS_MAIN, http_server_register);
   tvhftrace(LS_MAIN, satip_server_register);
-  tvhftrace(LS_MAIN, htsp_register);
+  TVH_STARTUP("htsp_register", htsp_register);
+#undef TVH_STARTUP
 
   if(opt_subscribe != NULL)
     subscription_dummy_join(opt_subscribe, 1);
