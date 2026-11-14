@@ -1267,6 +1267,8 @@ main(int argc, char **argv)
   tvhftrace(LS_MAIN, spawn_init);
   tvhftrace(LS_MAIN, idnode_init);
   tvhftrace(LS_MAIN, config_init, opt_nobackup == 0);
+  /* Runs while the configuration loads; epggrab_init reads its answer. */
+  tvhftrace(LS_MAIN, xmltv_find_grabbers_start);
 
   /* Memoryinfo */
   idclass_register(&memoryinfo_class);

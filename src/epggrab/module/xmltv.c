@@ -1698,6 +1698,24 @@ const idclass_t epggrab_mod_ext_xmltv_class = {
   }
 };
 
+/*
+ * tv_find_grabbers runs every installed grabber for its description, which
+ * takes seconds. Started early in startup, it runs while the configuration
+ * loads; _xmltv_load_grabbers then reads its output where it always did.
+ */
+static int xmltv_find_started;
+static int xmltv_find_ok;
+static int xmltv_find_rd = -1;
+
+void xmltv_find_grabbers_start ( void )
+{
+  if (xmltv_find_started)
+    return;
+  xmltv_find_started = 1;
+  xmltv_find_ok =
+    spawn_and_give_stdout(XMLTV_FIND, NULL, NULL, &xmltv_find_rd, NULL, 1) >= 0;
+}
+
 static void _xmltv_load_grabbers ( void )
 {
   int outlen = -1, rd = -1;
@@ -1708,7 +1726,10 @@ static void _xmltv_load_grabbers ( void )
   epggrab_module_t *mod;
 
   /* Load data */
-  if (spawn_and_give_stdout(XMLTV_FIND, NULL, NULL, &rd, NULL, 1) >= 0)
+  xmltv_find_grabbers_start();
+  rd = xmltv_find_rd;
+  xmltv_find_rd = -1;
+  if (xmltv_find_ok)
     outlen = file_readall(rd, &outbuf);
   if (rd >= 0)
     close(rd);

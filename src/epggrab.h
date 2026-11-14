@@ -402,6 +402,7 @@ void epggrab_rerun_internal            ( void );
  */
 void epggrab_init                 ( void );
 void epggrab_done                 ( void );
+void xmltv_find_grabbers_start    ( void );
 void epggrab_ota_init             ( void );
 void epggrab_ota_post             ( void );
 void epggrab_ota_shutdown         ( void );
