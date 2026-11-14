@@ -268,6 +268,78 @@ hts_settings_load_one(const char *filename, const fb_dir *dir, const char *name)
   return r;
 }
 
+/*
+ * Loading a directory of many settings files (one per IPTV mux or channel)
+ * spends most of its time reading, unpacking and parsing each file. That
+ * work is independent per file, so large directories load their files on a
+ * few threads; the results are still added in directory order.
+ */
+#define SETTINGS_PARALLEL_MIN     256
+#define SETTINGS_PARALLEL_THREADS 8
+
+typedef struct settings_parallel {
+  const fb_dir  *dir;
+  const char    *fullpath;
+  fb_dirent    **namelist;
+  int            depth;
+  int            count;
+  volatile int   next;
+  htsmsg_t     **result;
+} settings_parallel_t;
+
+static int
+hts_settings_skip_name(const char *name)
+{
+  return name[0] == '.' || name[0] == '\0' || name[strlen(name)-1] == '~';
+}
+
+static void *
+hts_settings_parallel_worker(void *aux)
+{
+  settings_parallel_t *sp = aux;
+  char child[PATH_MAX];
+  fb_dirent *d;
+  int i;
+
+  while ((i = atomic_add(&sp->next, 1)) < sp->count) {
+    d = sp->namelist[i];
+    if (hts_settings_skip_name(d->name))
+      continue;
+    if (d->type == FB_DIR && sp->depth > 0)
+      continue;                  /* subdirectories load in directory order */
+    snprintf(child, sizeof(child), "%s/%s", sp->fullpath, d->name);
+    sp->result[i] = hts_settings_load_one(child, sp->dir, d->name);
+  }
+  return NULL;
+}
+
+/* Load the plain files of a directory into result[], indexed like namelist. */
+static void
+hts_settings_load_parallel
+  (const char *fullpath, const fb_dir *dir, fb_dirent **namelist,
+   int n, int depth, htsmsg_t **result)
+{
+  settings_parallel_t sp = {
+    .dir = dir, .fullpath = fullpath, .namelist = namelist,
+    .depth = depth, .count = n, .next = 0, .result = result,
+  };
+  pthread_t threads[SETTINGS_PARALLEL_THREADS - 1];
+  long cpus = sysconf(_SC_NPROCESSORS_ONLN);
+  int i, started = 0;
+  int wanted = (int)MIN(MAX(cpus, 1), SETTINGS_PARALLEL_THREADS) - 1;
+
+  for (i = 0; i < wanted; i++) {
+    if (tvh_thread_create(&threads[started], NULL,
+                          hts_settings_parallel_worker, &sp, "settings"))
+      break;
+    started++;
+  }
+  /* This thread works too, so loading completes even without helpers. */
+  hts_settings_parallel_worker(&sp);
+  for (i = 0; i < started; i++)
+    pthread_join(threads[i], NULL);
+}
+
 /**
  *
  */
@@ -279,7 +351,7 @@ hts_settings_load_path(const char *fullpath, int depth)
   struct filebundle_stat st;
   fb_dirent **namelist, *d;
   fb_dir *dir;
-  htsmsg_t *r, *c;
+  htsmsg_t *r, *c, **loaded;
   int n, i;
 
   /* Invalid */
@@ -298,15 +370,21 @@ hts_settings_load_path(const char *fullpath, int depth)
     }
 
     /* Read files */
+    loaded = NULL;
+    if (fb_dir_is_direct(dir) && n >= SETTINGS_PARALLEL_MIN &&
+        (loaded = calloc(n, sizeof(*loaded))) != NULL)
+      hts_settings_load_parallel(fullpath, dir, namelist, n, depth, loaded);
     r = htsmsg_create_map();
     for(i = 0; i < n; i++) {
       d = namelist[i];
       name = d->name;
-      if(name[0] != '.' && name[0] && name[strlen(name)-1] != '~') {
+      if(!hts_settings_skip_name(name)) {
 
         snprintf(child, sizeof(child), "%s/%s", fullpath, d->name);
         if(d->type == FB_DIR && depth > 0) {
           c = hts_settings_load_path(child, depth - 1);
+        } else if (loaded) {
+          c = loaded[i];
         } else {
           c = hts_settings_load_one(child, dir, d->name);
         }
@@ -316,6 +394,7 @@ hts_settings_load_path(const char *fullpath, int depth)
       }
       free(d);
     }
+    free(loaded);
     free(namelist);
     fb_closedir(dir);
 

@@ -87,6 +87,7 @@ int fb_stat ( const char *path, struct filebundle_stat *st );
 fb_dir    *fb_opendir  ( const char *path );
 fb_dirent *fb_readdir  ( fb_dir *fb );
 void       fb_closedir ( fb_dir *fb );
+int        fb_dir_is_direct ( const fb_dir *fb );
 int        fb_scandir  ( const char *path, fb_dirent ***list );
 
 /* File processing wrappers */

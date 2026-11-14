@@ -186,6 +186,12 @@ void fb_closedir ( fb_dir *dir )
   free(dir);
 }
 
+/* A directory on disk rather than in the compiled-in bundle */
+int fb_dir_is_direct ( const fb_dir *dir )
+{
+  return dir->type == FB_DIRECT;
+}
+
 /* Iterate through entries */
 fb_dirent *fb_readdir ( fb_dir *dir )
 {

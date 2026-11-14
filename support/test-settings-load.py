@@ -6,6 +6,7 @@ Requires a debug-symbol build with file bundles and zlib enabled, and GDB.
 """
 import gzip
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -28,6 +29,44 @@ with tempfile.TemporaryDirectory(prefix='tvh-settings-test-') as directory:
     payload = bytes([2, 5, 0, 0, 0, 1]) + b'value' + bytes([11])
     (records / 'compressed').write_bytes(
         b'\xff\xffGZIP00' + len(payload).to_bytes(4, 'big') + gzip.compress(payload))
+    # Enough entries to load on several threads: every kind of entry, in
+    # the directory's own (unsorted) order.
+    many = root / 'many'
+    many.mkdir()
+    for i in range(600):
+        name = f'entry{i:03d}'
+        kind = i % 7
+        if kind == 0:
+            (many / name).write_text(json.dumps({'value': i}))
+        elif kind == 1:
+            data = bytes([2, 5, 0, 0, 0, 1]) + b'value' + bytes([i % 256])
+            (many / name).write_bytes(
+                b'\xff\xffGZIP00' + len(data).to_bytes(4, 'big') + gzip.compress(data))
+        elif kind == 2:
+            (many / name).write_text('invalid JSON')
+        elif kind == 3:
+            (many / ('.' + name)).write_text('{"value": 0}')
+        elif kind == 4:
+            (many / (name + '~')).write_text('{"value": 0}')
+        elif kind == 5:
+            (many / name).mkdir()
+            (many / name / 'child').write_text(json.dumps({'value': i}))
+        else:
+            (many / name).symlink_to(f'entry{i - 6:03d}')
+    def many_expected(recursive):
+        result = {}
+        for name in os.listdir(many):
+            if name.startswith('.') or name.endswith('~'):
+                continue
+            i = int(name[5:])
+            kind = i % 7
+            if kind == 0 or kind == 6:
+                result[name] = {'value': i if kind == 0 else i - 6}
+            elif kind == 1:
+                result[name] = {'value': i % 256}
+            elif kind == 5 and recursive:
+                result[name] = {'child': {'value': i}}
+        return result
     commands = '''set pagination off
 set confirm off
 set debuginfod enabled off
@@ -62,11 +101,18 @@ assert load('profiles') == load('data/conf/profiles', bundled=True)
 assert load('profiles')
 assert load('epggrab/eit/scrape') == load('data/conf/epggrab/eit/scrape', bundled=True)
 assert load('epggrab/eit/scrape')
-print('PASS: plain, gzip, recursive, symlink, hidden/backup exclusion, missing and bundled settings')
+for recursive, want in ((False, MANY_FLAT), (True, MANY_DEEP)):
+    got = load('many', recursive)
+    assert got == want, 'parallel load differs'
+    assert list(got) == list(want), 'parallel load changed the order'
+print('PASS: plain, gzip, recursive, symlink, hidden/backup exclusion, missing and bundled settings; '
+      'a 600-entry directory loaded on several threads in directory order')
 end
 kill
 quit
-'''.replace('root = ROOT', 'root = ' + repr(str(root)))
+'''.replace('root = ROOT', 'root = ' + repr(str(root))
+          ).replace('MANY_FLAT', repr(many_expected(False))
+          ).replace('MANY_DEEP', repr(many_expected(True)))
     script = root / 'test.gdb'
     script.write_text(commands)
     subprocess.run(['gdb', '-q', '-batch', '-x', str(script), '--args',
