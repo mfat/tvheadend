@@ -1504,6 +1504,24 @@ bouquet_service_resolve(void)
       continue;
     saveflag = bq->bq_saveflag;
     if (bq->bq_enabled) {
+      size_t count = 0, n = 0;
+      idnode_t **nodes;
+      HTSMSG_FOREACH(f, bq->bq_services_waiting)
+        count++;
+      /* Fill the service set in one pass first. Added one at a time, each
+       * insert into the sorted set moved every later entry: with a playlist
+       * of 60,000 channels that was a large part of startup. The set then
+       * already holds each service when bouquet_add_service runs. */
+      nodes = calloc(MAX(count, 1), sizeof(*nodes));
+      if (nodes) {
+        HTSMSG_FOREACH(f, bq->bq_services_waiting) {
+          if (htsmsg_field_get_map(f) == NULL) continue;
+          if ((s = service_find_by_uuid(htsmsg_field_name(f))) != NULL)
+            nodes[n++] = &s->s_id;
+        }
+        idnode_set_add_many(bq->bq_services, nodes, n);
+        free(nodes);
+      }
       HTSMSG_FOREACH(f, bq->bq_services_waiting) {
         if ((e = htsmsg_field_get_map(f)) == NULL) continue;
         lcn = htsmsg_get_s64_or_default(e, "lcn", 0);

@@ -1071,6 +1071,58 @@ idnode_set_add
   }
 }
 
+static int
+idnode_ptr_cmp ( const void *a, const void *b )
+{
+  const idnode_t *x = *(idnode_t * const *)a, *y = *(idnode_t * const *)b;
+  return x < y ? -1 : (x > y ? 1 : 0);
+}
+
+/*
+ * Add every node of an array that the set does not hold yet, in one pass.
+ * Adding tens of thousands of nodes one by one to a sorted set moves the
+ * tail of the array for each of them. The array is reordered in place.
+ */
+void
+idnode_set_add_many
+  ( idnode_set_t *is, idnode_t **in, size_t count )
+{
+  size_t i, j, k, n, old;
+  idnode_t **a;
+
+  if (count == 0)
+    return;
+  if (!is->is_sorted) {
+    for (i = 0; i < count; i++)
+      if (!idnode_set_exists(is, in[i]))
+        idnode_set_add(is, in[i], NULL, NULL);
+    return;
+  }
+  qsort(in, count, sizeof(*in), idnode_ptr_cmp);
+  for (i = n = 0; i < count; i++)
+    if (n == 0 || in[n - 1] != in[i])
+      in[n++] = in[i];
+  old = is->is_count;
+  idnode_set_alloc(is, old + n);
+  a = is->is_array;
+  /* Merge from the back, so the existing entries move at most once. */
+  i = old; j = n; k = old + n;
+  while (j > 0) {
+    if (i > 0 && a[i - 1] > in[j - 1]) {
+      a[--k] = a[--i];
+    } else if (i > 0 && a[i - 1] == in[j - 1]) {
+      j--;                    /* already in the set */
+    } else {
+      a[--k] = in[--j];
+    }
+  }
+  /* Skipped duplicates leave a gap between the merged part and the rest. */
+  if (k != i) {
+    memmove(a + i, a + k, (old + n - k) * sizeof(*a));
+  }
+  is->is_count = i + (old + n - k);
+}
+
 ssize_t
 idnode_set_find_index
   ( idnode_set_t *is, idnode_t *in )
