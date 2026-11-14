@@ -40,6 +40,23 @@ static htsmsg_t              *notify_queue;
 static pthread_t              notify_tid;
 static void*                  notify_thread(void* p);
 static RB_HEAD(, notify_pending) notify_pending;
+/* Delayed notifications only reach clients connected when they are sent.
+ * While startup loads every mux, service and channel, nothing can be
+ * connected, and queueing a change for each of them cost about a second
+ * with a large IPTV playlist, then flooded the first web client. */
+static int                    notify_clients;
+
+void
+notify_clients_possible(void)
+{
+  atomic_set(&notify_clients, 1);
+}
+
+int
+notify_wanted(void)
+{
+  return tvheadend_is_running() && atomic_get(&notify_clients);
+}
 
 static int
 notify_pending_cmp(notify_pending_t *a, notify_pending_t *b)
@@ -83,7 +100,7 @@ notify_delayed(const char *id, const char *event, const char *action)
   notify_pending_t *p;
   size_t len;
 
-  if (!tvheadend_is_running())
+  if (!notify_wanted())
     return;
 
   len = strlen(event) + strlen(action) + strlen(id) + 3;

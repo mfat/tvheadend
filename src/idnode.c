@@ -1981,10 +1981,11 @@ idnode_notify ( idnode_t *in, const char *action )
 {
   const idclass_t *ic = in->in_class;
   char ubuf[UUID_HEX_SIZE];
-  const char *uuid = idnode_uuid_as_str(in, ubuf);
+  const char *uuid;
 
-  if (!tvheadend_is_running())
+  if (!notify_wanted())
     return;
+  uuid = idnode_uuid_as_str(in, ubuf);
 
   while (ic) {
     if (ic->ic_event) {

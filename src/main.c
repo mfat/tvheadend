@@ -1341,6 +1341,7 @@ main(int argc, char **argv)
 #if ENABLE_TIMESHIFT
   tvhftrace(LS_MAIN, timeshift_init);
 #endif
+  notify_clients_possible();
   tvhftrace(LS_MAIN, tcp_server_init);
   tvhftrace(LS_MAIN, webui_init, opt_xspf);
 #if ENABLE_UPNP

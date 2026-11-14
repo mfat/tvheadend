@@ -30,6 +30,11 @@ void notify_reload(const char *class);
 
 void notify_delayed(const char *id, const char *event, const char *action);
 
+/* Called before connections are accepted. Until then no client can hold a
+ * mailbox, and one connecting later reads the state loaded by then. */
+void notify_clients_possible(void);
+int notify_wanted(void);
+
 void notify_init(void);
 void notify_done(void);
 
