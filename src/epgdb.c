@@ -17,12 +17,9 @@
  */
 
 #include <string.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <signal.h>
-#include <setjmp.h>
 
 #include "tvheadend.h"
 #include "sbuf.h"
@@ -105,32 +102,32 @@ static memoryinfo_t epg_memoryinfo_broadcasts = {
 };
 
 /*
- * Recovery
+ * Reading and unpacking the database file needs nothing else from the
+ * server, so it runs on a helper thread while networks, muxes and channels
+ * load. epg_init waits for it and restores the broadcasts at the same point
+ * of startup as before.
  */
-static sigjmp_buf epg_mmap_env;
+typedef struct epgdb_file {
+  int       found;   /* a database file was read */
+  int       ver;
+  uint8_t  *data;    /* the unpacked database */
+  size_t    size;
+} epgdb_file_t;
 
-static void epg_mmap_sigbus (int sig, siginfo_t *siginfo, void *ptr)
-{
-  siglongjmp(epg_mmap_env, 1);
-}
+static pthread_t    epgdb_read_tid;
+static int          epgdb_read_started;
+static epgdb_file_t epgdb_read_result;
 
-/*
- * Load data
- */
-void epg_init ( void )
+static void
+epgdb_read_file ( epgdb_file_t *f )
 {
-  int fd = -1, r;
+  int fd = -1, ver = EPG_DB_VERSION;
   struct stat st;
-  size_t remain;
-  uint8_t *mem, *rp, *zlib_mem = NULL;
-  epggrab_stats_t stats;
-  int ver = EPG_DB_VERSION;
-  struct sigaction act, oldact;
-  char *sect = NULL;
-  int profile = tvhtrace_enabled();
-  int64_t decode_us = 0, restore_us = 0, destroy_us = 0, profile_at;
+  uint8_t *mem = NULL;
+  size_t got = 0;
+  ssize_t r;
 
-  memoryinfo_register(&epg_memoryinfo_broadcasts);
+  memset(f, 0, sizeof(*f));
 
   /* Find the right file (and version) */
   while (fd < 0 && ver > 0) {
@@ -145,16 +142,6 @@ void epg_init ( void )
     return;
   }
 
-  memset (&act, 0, sizeof(act));
-  act.sa_sigaction = epg_mmap_sigbus;
-  act.sa_flags = SA_SIGINFO;
-  if (sigaction(SIGBUS, &act, &oldact)) {
-    tvherror(LS_EPGDB, "failed to install SIGBUS handler");
-    close(fd);
-    return;
-  }
-  
-  /* Map file to memory */
   if ( fstat(fd, &st) != 0 ) {
     tvherror(LS_EPGDB, "failed to detect database size");
     goto end;
@@ -163,33 +150,99 @@ void epg_init ( void )
     tvhdebug(LS_EPGDB, "database is empty");
     goto end;
   }
-  remain   = st.st_size;
-  rp = mem = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
-  if ( mem == MAP_FAILED ) {
-    tvherror(LS_EPGDB, "failed to mmap database");
+  mem = malloc(st.st_size);
+  if ( !mem ) {
+    tvherror(LS_EPGDB, "failed to allocate %jd bytes for the database",
+             (intmax_t)st.st_size);
     goto end;
   }
-
-  if (sigsetjmp(epg_mmap_env, 1)) {
-    tvherror(LS_EPGDB, "failed to read from mapped file");
-    if (mem)
-      munmap(mem, st.st_size);
+  while ( got < (size_t)st.st_size ) {
+    r = read(fd, mem + got, st.st_size - got);
+    if ( r < 0 && (errno == EINTR || errno == EAGAIN) ) continue;
+    if ( r <= 0 ) break;
+    got += r;
+  }
+  if ( got != (size_t)st.st_size ) {
+    tvherror(LS_EPGDB, "failed to read the database");
     goto end;
   }
 
 #if ENABLE_ZLIB
-  if (remain > 12 && memcmp(rp, "\xff\xffGZIP01", 8) == 0 &&
-      (rp[7] == '0' || rp[7] == '1')) {
-    uint32_t orig = (rp[8] << 24) | (rp[9] << 16) | (rp[10] << 8) | rp[11];
-    int64_t inflate_at = profile ? getmonoclock() : 0;
+  if (got > 12 && memcmp(mem, "\xff\xffGZIP01", 8) == 0 &&
+      (mem[7] == '0' || mem[7] == '1')) {
+    uint32_t orig = (mem[8] << 24) | (mem[9] << 16) | (mem[10] << 8) | mem[11];
+    int64_t inflate_at = getmonoclock();
+    uint8_t *unpacked;
     tvhinfo(LS_EPGDB, "gzip format detected, inflating (ratio %.1f%% deflated size %zd)",
-            ((remain * 100.0) / orig), remain);
-    rp = zlib_mem = tvh_gzip_inflate(rp + 12, remain - 12, orig);
-    remain = rp ? orig : 0;
+            ((got * 100.0) / orig), got);
+    unpacked = tvh_gzip_inflate(mem + 12, got - 12, orig);
+    free(mem);
+    mem = unpacked;
+    got = mem ? orig : 0;
     tvhtrace(LS_MAIN, "startup epg inflate: %"PRId64" ms",
             mono2ms(getmonoclock() - inflate_at));
   }
 #endif
+
+  /* A file that fails to unpack still counts as found: it restores
+   * nothing, like an empty one would, and the defaults apply. */
+  f->found = 1;
+  f->ver  = ver;
+  f->data = mem;
+  f->size = got;
+  mem = NULL;
+end:
+  free(mem);
+  close(fd);
+}
+
+static void *
+epgdb_read_thread ( void *aux )
+{
+  int64_t at = getmonoclock();
+  epgdb_read_file(&epgdb_read_result);
+  tvhtrace(LS_MAIN, "startup epg read: %"PRId64" ms", mono2ms(getmonoclock() - at));
+  return NULL;
+}
+
+void epg_read_start ( void )
+{
+  if (!tvh_thread_create(&epgdb_read_tid, NULL, epgdb_read_thread, NULL, "epgdb"))
+    epgdb_read_started = 1;
+}
+
+/*
+ * Load data
+ */
+void epg_init ( void )
+{
+  int r;
+  size_t remain;
+  uint8_t *rp;
+  epggrab_stats_t stats;
+  epgdb_file_t file;
+  char *sect = NULL;
+  int profile = tvhtrace_enabled();
+  int64_t decode_us = 0, restore_us = 0, destroy_us = 0, profile_at;
+
+  memoryinfo_register(&epg_memoryinfo_broadcasts);
+
+  /* The file was read while the configuration loaded, or is read now */
+  if (epgdb_read_started) {
+    int64_t wait_at = getmonoclock();
+    pthread_join(epgdb_read_tid, NULL);
+    epgdb_read_started = 0;
+    file = epgdb_read_result;
+    memset(&epgdb_read_result, 0, sizeof(epgdb_read_result));
+    tvhtrace(LS_MAIN, "startup epg read wait: %"PRId64" ms",
+             mono2ms(getmonoclock() - wait_at));
+  } else {
+    epgdb_read_file(&file);
+  }
+  if (!file.found)
+    return;
+  rp = file.data;
+  remain = file.size;
 
   tvhinfo(LS_EPGDB, "parsing %zd bytes", remain);
 
@@ -220,7 +273,7 @@ void epg_init ( void )
 
     /* Process */
     profile_at = profile ? getmonoclock() : 0;
-    switch (ver) {
+    switch (file.ver) {
       case 3:
         _epgdb_v3_process(&sect, m, &stats);
         break;
@@ -251,16 +304,11 @@ void epg_init ( void )
   }
 
   /* Stats */
-  tvhinfo(LS_EPGDB, "loaded v%d", ver);
+  tvhinfo(LS_EPGDB, "loaded v%d", file.ver);
   tvhinfo(LS_EPGDB, "  config     %d", stats.config.total);
   tvhinfo(LS_EPGDB, "  broadcasts %d", stats.broadcasts.total);
 
-  /* Close file */
-  munmap(mem, st.st_size);
-  free(zlib_mem);
-end:
-  sigaction(SIGBUS, &oldact, NULL);
-  close(fd);
+  free(file.data);
 }
 
 void epg_done ( void )

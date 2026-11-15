@@ -583,6 +583,7 @@ void epg_query_free(epg_query_t *eq);
  * Setup/Shutdown
  * ***********************************************************************/
 
+void epg_read_start (void);
 void epg_init    (void);
 void epg_done    (void);
 void epg_skel_done (void);
