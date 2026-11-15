@@ -1520,6 +1520,10 @@ bouquet_service_resolve(void)
             nodes[n++] = &s->s_id;
         }
         idnode_set_add_many(bq->bq_services, nodes, n);
+        /* bouquet_add_service puts each service in the active set too, one
+         * insert at a time; fill that set in one pass as well. */
+        if (!bq->bq_in_load)
+          idnode_set_add_many(bq->bq_active_services, nodes, n);
         free(nodes);
       }
       HTSMSG_FOREACH(f, bq->bq_services_waiting) {
