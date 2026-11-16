@@ -65,12 +65,104 @@ prop_find(const property_t *p, const char *id)
  * Write
  * *************************************************************************/
 
+/*
+ * Field lookup for prop_write_values. Every property of a class is looked
+ * up by name in the message, so a linear search costs properties x fields
+ * per object: most of the time spent creating channels, services and muxes
+ * from their saved settings. A small hash of the message's fields makes each
+ * lookup one probe. The index keeps the first field of a given name, as the
+ * linear search finds it, and is only used while the message is unchanged.
+ */
+#define PROP_INDEX_MIN 8
+
+static inline uint32_t
+prop_index_hash(const char *s)
+{
+  uint32_t h = 2166136261u;
+  while (*s)
+    h = (h ^ (uint8_t)*s++) * 16777619u;
+  return h;
+}
+
+void
+prop_index_init(prop_index_t *idx, htsmsg_t *m)
+{
+  htsmsg_field_t *f;
+  uint32_t n = 0, size, h;
+
+  idx->msg = m;
+  idx->slots = NULL;
+  idx->mask = 0;
+  if (m == NULL)
+    return;
+  TAILQ_FOREACH(f, &m->hm_fields, hmf_link)
+    n++;
+  if (n < PROP_INDEX_MIN)
+    return;
+  for (size = 16; size < n * 2; size <<= 1);
+  if (size <= ARRAY_SIZE(idx->stack)) {
+    idx->slots = idx->stack;
+  } else {
+    idx->slots = malloc(size * sizeof(*idx->slots));
+    if (idx->slots == NULL)
+      return;
+  }
+  memset(idx->slots, 0, size * sizeof(*idx->slots));
+  idx->mask = size - 1;
+  TAILQ_FOREACH(f, &m->hm_fields, hmf_link) {
+    const char *name = htsmsg_field_name(f);
+    for (h = prop_index_hash(name) & idx->mask; idx->slots[h];
+         h = (h + 1) & idx->mask)
+      if (!strcmp(htsmsg_field_name(idx->slots[h]), name))
+        break;
+    if (idx->slots[h] == NULL)
+      idx->slots[h] = f;
+  }
+}
+
+void
+prop_index_done(prop_index_t *idx)
+{
+  if (idx->slots && idx->slots != idx->stack)
+    free(idx->slots);
+  idx->slots = NULL;
+}
+
+static htsmsg_field_t *
+prop_index_find(const prop_index_t *idx, const char *name)
+{
+  uint32_t h;
+
+  if (idx->slots == NULL)
+    return htsmsg_field_find(idx->msg, name);
+  for (h = prop_index_hash(name) & idx->mask; idx->slots[h];
+       h = (h + 1) & idx->mask)
+    if (!strcmp(htsmsg_field_name(idx->slots[h]), name))
+      return idx->slots[h];
+  return NULL;
+}
+
 /**
  *
  */
 int
 prop_write_values
   (void *obj, const property_t *pl, htsmsg_t *m, int optmask,
+   htsmsg_t *updated)
+{
+  prop_index_t idx;
+  int save;
+
+  if (!pl) return 0;
+  prop_index_init(&idx, m);
+  save = prop_write_values_index(obj, pl, &idx, optmask, updated);
+  prop_index_done(&idx);
+  return save;
+}
+
+int
+prop_write_values_index
+  (void *obj, const property_t *pl, const prop_index_t *idx, int optmask,
    htsmsg_t *updated)
 {
   int save, save2 = 0;
@@ -100,7 +192,7 @@ prop_write_values
 
     if (p->type == PT_NONE) continue;
 
-    f = htsmsg_field_find(m, p->id);
+    f = prop_index_find(idx, p->id);
     if (!f) continue;
 
     /* Ignore */

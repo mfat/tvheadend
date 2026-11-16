@@ -138,8 +138,21 @@ extern const char *prop_ptr;
 
 const property_t *prop_find(const property_t *p, const char *name);
 
+typedef struct prop_index {
+  htsmsg_t *msg;
+  htsmsg_field_t **slots;
+  uint32_t mask;
+  htsmsg_field_t *stack[256];
+} prop_index_t;
+
+void prop_index_init(prop_index_t *idx, htsmsg_t *m);
+void prop_index_done(prop_index_t *idx);
+
 int prop_write_values
   (void *obj, const property_t *pl, htsmsg_t *m, int optmask, htsmsg_t *updated);
+int prop_write_values_index
+  (void *obj, const property_t *pl, const prop_index_t *idx, int optmask,
+   htsmsg_t *updated);
 
 void prop_read_values
   (void *obj, const property_t *pl, htsmsg_t *m, htsmsg_t *list,

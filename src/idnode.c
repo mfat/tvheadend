@@ -1210,13 +1210,27 @@ idnode_set_free ( idnode_set_t *is )
  * *************************************************************************/
 
 static int
-idnode_class_write_values
-  ( idnode_t *self, const idclass_t *idc, htsmsg_t *c, int optmask )
+idnode_class_write_values_index
+  ( idnode_t *self, const idclass_t *idc, const prop_index_t *idx, int optmask )
 {
   int save = 0;
   if (idc->ic_super)
-    save |= idnode_class_write_values(self, idc->ic_super, c, optmask);
-  save |= prop_write_values(self, idc->ic_properties, c, optmask, NULL);
+    save |= idnode_class_write_values_index(self, idc->ic_super, idx, optmask);
+  if (idc->ic_properties)
+    save |= prop_write_values_index(self, idc->ic_properties, idx, optmask, NULL);
+  return save;
+}
+
+static int
+idnode_class_write_values
+  ( idnode_t *self, const idclass_t *idc, htsmsg_t *c, int optmask )
+{
+  prop_index_t idx;
+  int save;
+  /* One field index for the whole class chain */
+  prop_index_init(&idx, c);
+  save = idnode_class_write_values_index(self, idc, &idx, optmask);
+  prop_index_done(&idx);
   return save;
 }
 
