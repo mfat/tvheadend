@@ -1155,7 +1155,7 @@ iptv_network_create0
       HTSMSG_FOREACH(f, c)
         iptv_network_load_mux(in, f);
     }
-    htsmsg_destroy(c);
+    hts_settings_free_later(c);
   }
 
   if (idc == &iptv_auto_network_class)

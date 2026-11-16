@@ -1481,7 +1481,7 @@ channel_init ( void )
     (void)channel_create(htsmsg_field_name(f), e, NULL);
   }
   channel_in_load = 0;
-  htsmsg_destroy(c);
+  hts_settings_free_later(c);
 
   /* Pair slave EPG, set parent again without channel_in_load */
   CHANNEL_FOREACH(ch)

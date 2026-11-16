@@ -340,6 +340,34 @@ hts_settings_load_parallel
     pthread_join(threads[i], NULL);
 }
 
+/*
+ * Freeing the settings tree of a large directory (every IPTV mux with its
+ * services, every channel) is a walk of hundreds of thousands of small
+ * allocations. Once the objects are created from it, nothing refers to it,
+ * so it is freed on a short-lived thread instead of holding up startup.
+ */
+static void *
+hts_settings_free_thread(void *aux)
+{
+  htsmsg_destroy(aux);
+  return NULL;
+}
+
+void
+hts_settings_free_later(htsmsg_t *settings)
+{
+  pthread_t tid;
+
+  if (settings == NULL)
+    return;
+  if (tvh_thread_create(&tid, NULL, hts_settings_free_thread, settings,
+                        "settings-free")) {
+    htsmsg_destroy(settings);
+    return;
+  }
+  pthread_detach(tid);
+}
+
 /**
  *
  */

@@ -36,6 +36,8 @@ htsmsg_t *hts_settings_load(const char *pathfmt, ...);
 
 htsmsg_t *hts_settings_load_r(int depth, const char *pathfmt, ...);
 
+void hts_settings_free_later(htsmsg_t *settings);
+
 void hts_settings_remove(const char *pathfmt, ...);
 
 const char *hts_settings_get_root(void);
