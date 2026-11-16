@@ -15,6 +15,11 @@ tvh_open(const char *pathname, int flags, mode_t mode)
 {
   int fd;
 
+#ifdef O_CLOEXEC
+  /* Atomic close-on-exec: no need to hold fork_lock, which would make
+   * threads that open many files (settings loading) wait on each other. */
+  return open(pathname, flags | O_CLOEXEC, mode);
+#endif
   tvh_mutex_lock(&fork_lock);
   fd = open(pathname, flags, mode);
   if (fd != -1)
@@ -137,6 +142,13 @@ tvh_fopen(const char *filename, const char *mode)
 {
   FILE *f;
   int fd;
+#ifdef __linux__
+  /* glibc and musl open with O_CLOEXEC for "e": atomic, so fork_lock is
+   * not needed and threads loading settings files do not wait on it. */
+  char emode[16];
+  if (snprintf(emode, sizeof(emode), "%se", mode) < (int)sizeof(emode))
+    return fopen(filename, emode);
+#endif
   tvh_mutex_lock(&fork_lock);
   f = fopen(filename, mode);
   if (f) {
