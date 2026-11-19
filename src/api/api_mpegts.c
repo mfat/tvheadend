@@ -201,24 +201,48 @@ api_mpegts_network_muxcreate
   int err = EINVAL;
   mpegts_network_t *mn;
   mpegts_mux_t *mm;
-  htsmsg_t *conf;
+  htsmsg_t *conf, *confs, *uuids = NULL;
+  htsmsg_field_t *f;
   const char *uuid;
 
   if (!(uuid = htsmsg_get_str(args, "uuid")))
     return EINVAL;
-  if (!(conf = htsmsg_get_map(args, "conf")))
+  if (!(f = htsmsg_field_find(args, "conf")))
     return EINVAL;
-  
+  /* List of confs (batch create) or a single conf map. */
+  confs = htsmsg_field_get_list(f);
+  conf  = confs ? NULL : htsmsg_field_get_map(f);
+  if (!confs && !conf)
+    return EINVAL;
+
   tvh_mutex_lock(&global_lock);
-  
-  if (!(mn  = mpegts_network_find(uuid)))
-    goto exit;
-  
-  if (!(mm = mn->mn_mux_create2(mn, conf)))
+
+  if (!(mn = mpegts_network_find(uuid)))
     goto exit;
 
-  api_idnode_create(resp, &mm->mm_id);
-  err = 0;
+  if (confs) {
+    HTSMSG_FOREACH(f, confs) {
+      if (!(conf = htsmsg_field_get_map(f)))
+        break;
+      if (!(mm = mn->mn_mux_create2(mn, conf)))
+        break;
+      if (uuids == NULL)
+        uuids = htsmsg_create_list();
+      idnode_changed(&mm->mm_id);
+      htsmsg_add_uuid(uuids, NULL, &mm->mm_id.in_uuid);
+    }
+    /* Return what was created so the client can record UUIDs after a
+     * mid-batch failure; EINVAL only when nothing was created. */
+    if (uuids) {
+      api_idnode_create_list(resp, uuids);
+      err = 0;
+    }
+  } else {
+    if (!(mm = mn->mn_mux_create2(mn, conf)))
+      goto exit;
+    api_idnode_create(resp, &mm->mm_id);
+    err = 0;
+  }
 
 exit:
   tvh_mutex_unlock(&global_lock);
