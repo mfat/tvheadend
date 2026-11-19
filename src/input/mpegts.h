@@ -882,7 +882,6 @@ void mpegts_network_get_type_str( mpegts_network_t *mn, char *buf, size_t buflen
 void mpegts_network_bouquet_trigger0(mpegts_network_t *mn, int timeout);
 static inline void mpegts_network_bouquet_trigger(mpegts_network_t *mn, int timeout)
 { if (mn->mn_bouquet) mpegts_network_bouquet_trigger0(mn, timeout); }
-void mpegts_network_bouquet_trigger_all(void);
 
 htsmsg_t * mpegts_network_wizard_get ( mpegts_input_t *mi, const idclass_t *idc,
                                        mpegts_network_t *mn, const char *lang );

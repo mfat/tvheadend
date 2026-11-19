@@ -538,11 +538,7 @@ htsp_generate_challenge(htsp_connection_t *htsp)
 static inline int
 htsp_user_access_channel(htsp_connection_t *htsp, channel_t *ch)
 {
-  /* Pending saved services make a channel available in the early snapshot.
-   * Permanently unplayable channels remain hidden after startup. */
-  if (!ch || !ch->ch_enabled ||
-      (LIST_FIRST(&ch->ch_services) == NULL &&
-       (channel_inputs_loaded() || ch->ch_pending == NULL)))
+  if (!ch || !ch->ch_enabled || LIST_FIRST(&ch->ch_services) == NULL) /* Don't pass unplayable channels to clients */
     return 0;
   if (!htsp)
     return 1;
@@ -1572,8 +1568,7 @@ htsp_method_api(htsp_connection_t *htsp, htsmsg_t *in)
       default:
         htsmsg_destroy(args2);
         htsmsg_destroy(ret);
-        tvh_mutex_lock(&global_lock);
-        return htsp_error(htsp, r == EBUSY ? N_("Server is still loading") : N_("Bad request"));
+        return htsp_error(htsp, N_("Bad request"));
     }
   } else if (resp) {
     /* Output response */
@@ -3479,15 +3474,6 @@ readmsg:
             goto readmsg;
 
           } else {
-            /* Only handshake and channel metadata are safe while inputs,
-             * EPG and DVR schedules are still being restored. */
-            if (!channel_inputs_loaded() &&
-                strcmp(method, "hello") && strcmp(method, "authenticate") &&
-                strcmp(method, "api") && strcmp(method, "enableAsyncMetadata") &&
-                strcmp(method, "getChannel") && strcmp(method, "getSysTime")) {
-              reply = htsp_error(htsp, N_("Server is still loading"));
-              goto send_reply_with_unlock;
-            }
             if (!streaming && htsp_method_streams(method, m)) {
               tcp_connection_land(tcp_id);
               tcp_id = tcp_connection_launch(htsp->htsp_fd, 1, htsp_server_status,

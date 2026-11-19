@@ -442,12 +442,6 @@ check_bin ${GZIPCMD} || die 'no gzip binary found'
 check_bin ${BZIP2} || echo 'WARN: no bzip2 binary found'
 
 #
-# SQLite is required by the settings backend on every platform. Use
-# pkg-config for non-system include/library paths as well as linker flags.
-#
-check_pkg sqlite3 || die "SQLite development support not found"
-
-#
 # SSL
 #
 if [ ${PLATFORM} = "freebsd" ]; then

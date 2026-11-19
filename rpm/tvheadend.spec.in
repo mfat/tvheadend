@@ -29,7 +29,6 @@ BuildRequires:  avahi-devel
 BuildRequires:  avahi-libs
 BuildRequires:  libdvbcsa-devel
 BuildRequires:  openssl-devel
-BuildRequires:  sqlite-devel
 BuildRequires:  wget python git
 BuildRequires:  cmake
 BuildRequires:  python3

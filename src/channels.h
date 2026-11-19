@@ -61,9 +61,6 @@ typedef struct channel
 
   /* Service/subscriptions */
   idnode_list_head_t           ch_services;
-  struct channel_pending      *ch_pending; /* service UUIDs not created yet */
-  LIST_ENTRY(channel)          ch_service_update_link;
-  int                          ch_service_update_pending;
   LIST_HEAD(, th_subscription) ch_subscriptions;
 
   /* EPG fields */
@@ -125,22 +122,8 @@ extern const idclass_t channel_class;
 extern const idclass_t channel_tag_class;
 extern const char *channel_blank_name;
 
-struct service;
-
 void channel_init(void);
 void channel_done(void);
-
-/* 0 until inputs and dependent EPG/DVR state are restored; only channel
- * metadata requests are safe before this becomes 1. */
-int channel_inputs_loaded(void);
-void channel_inputs_loaded_set(int on);
-
-/* Link a service that was named by a channel loaded before it existed. */
-void channel_service_attach(struct service *s);
-
-/* The global lock is held. Wait at most 30 seconds for startup, aborting on
- * shutdown. The returned pointer is looked up again after every unlock. */
-struct channel *channel_wait_for_service(struct channel *ch);
 
 channel_t *channel_create0
   (channel_t *ch, const idclass_t *idc, const char *uuid, htsmsg_t *conf,

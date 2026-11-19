@@ -253,7 +253,6 @@ SRCS-1 = \
 	src/misc/json.c \
 	src/misc/m3u.c \
 	src/settings.c \
-	src/settings_sqlite.c \
 	src/htsbuf.c \
 	src/trap.c \
 	src/htsstr.c \
