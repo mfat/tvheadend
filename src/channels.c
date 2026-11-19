@@ -25,6 +25,7 @@
 #include "epg.h"
 #include "epggrab.h"
 #include "channels.h"
+#include "service.h"
 #include "access.h"
 #include "notify.h"
 #include "dvr/dvr.h"
@@ -46,6 +47,227 @@ int channel_tags_count;
 
 const char *channel_blank_name = N_("{name-not-set}");
 static int channel_in_load;
+
+/*
+ * Channels are published before muxes exist, because building every mux is
+ * the slow part of startup and the channel list does not need it. The
+ * channel record is the only place the service UUID is stored, so a UUID
+ * that cannot be resolved yet is kept here and linked when the service is
+ * created. A save in between still writes the UUID.
+ */
+#define CHANNEL_PENDING_BUCKETS 4096
+
+typedef struct channel_pending {
+  struct channel_pending *bucket_next;
+  struct channel_pending *ch_next;
+  channel_t              *ch;
+  char                    uuid[UUID_HEX_SIZE];
+} channel_pending_t;
+
+static channel_pending_t *channel_pending_buckets[CHANNEL_PENDING_BUCKETS];
+static volatile int channel_inputs_loaded_flag;
+static volatile int channel_link_generation;
+static tvh_mutex_t channel_link_lock;
+static tvh_cond_t channel_link_cond;
+static int channel_link_lock_ready;
+static LIST_HEAD(, channel) channel_service_updates = LIST_HEAD_INITIALIZER(channel_service_updates);
+static mtimer_t channel_service_update_timer;
+
+/* Coalesce service attachments, and bound work under global_lock. Queue
+ * entries belong to channels and are removed before a channel is freed. */
+static void
+channel_service_updates_send(void *aux)
+{
+  channel_t *ch;
+  int count = 0;
+
+  while (count++ < 128 && (ch = LIST_FIRST(&channel_service_updates)) != NULL) {
+    LIST_REMOVE(ch, ch_service_update_link);
+    ch->ch_service_update_pending = 0;
+    htsp_channel_update(ch);
+    idnode_notify_changed(&ch->ch_id);
+  }
+  if (!LIST_EMPTY(&channel_service_updates))
+    mtimer_arm_rel(&channel_service_update_timer, channel_service_updates_send, NULL, ms2mono(1));
+}
+
+static void
+channel_service_update_queue(channel_t *ch)
+{
+  if (ch->ch_service_update_pending)
+    return;
+  if (LIST_EMPTY(&channel_service_updates))
+    mtimer_arm_rel(&channel_service_update_timer, channel_service_updates_send, NULL, ms2mono(200));
+  ch->ch_service_update_pending = 1;
+  LIST_INSERT_HEAD(&channel_service_updates, ch, ch_service_update_link);
+}
+
+static uint32_t
+channel_pending_hash(const char *uuid)
+{
+  uint32_t h = 2166136261u;
+  while (*uuid)
+    h = (h ^ (uint8_t)*uuid++) * 16777619u;
+  return h;
+}
+
+static void
+channel_link_signal(void)
+{
+  if (!channel_link_lock_ready)
+    return;
+  atomic_add(&channel_link_generation, 1);
+  tvh_mutex_lock(&channel_link_lock);
+  tvh_cond_signal(&channel_link_cond, 1);
+  tvh_mutex_unlock(&channel_link_lock);
+}
+
+int
+channel_inputs_loaded(void)
+{
+  return atomic_get(&channel_inputs_loaded_flag);
+}
+
+void
+channel_inputs_loaded_set(int on)
+{
+  channel_t *ch;
+  atomic_set(&channel_inputs_loaded_flag, on);
+  if (on) {
+    /* Missing saved services must not leave phantom channels in early
+     * clients. The same bounded queue sends their final visibility. */
+    CHANNEL_FOREACH(ch)
+      if (ch->ch_pending)
+        channel_service_update_queue(ch);
+    channel_link_signal();
+  }
+}
+
+static void
+channel_pending_unlink(channel_pending_t *item)
+{
+  uint32_t bucket = channel_pending_hash(item->uuid) % CHANNEL_PENDING_BUCKETS;
+  channel_pending_t **prev = &channel_pending_buckets[bucket];
+  while (*prev) {
+    if (*prev == item) {
+      *prev = item->bucket_next;
+      break;
+    }
+    prev = &(*prev)->bucket_next;
+  }
+  prev = &item->ch->ch_pending;
+  while (*prev) {
+    if (*prev == item) {
+      *prev = item->ch_next;
+      break;
+    }
+    prev = &(*prev)->ch_next;
+  }
+  free(item);
+}
+
+static void
+channel_pending_clear(channel_t *ch)
+{
+  while (ch->ch_pending)
+    channel_pending_unlink(ch->ch_pending);
+}
+
+static void
+channel_pending_add(channel_t *ch, const char *uuid)
+{
+  channel_pending_t *item;
+  uint32_t bucket;
+
+  if (!uuid || !uuid[0] || strlen(uuid) >= UUID_HEX_SIZE)
+    return;
+  for (item = ch->ch_pending; item; item = item->ch_next)
+    if (!strcmp(item->uuid, uuid))
+      return;
+  item = calloc(1, sizeof(*item));
+  if (!item)
+    return;
+  item->ch = ch;
+  memcpy(item->uuid, uuid, strlen(uuid) + 1);
+  item->ch_next = ch->ch_pending;
+  ch->ch_pending = item;
+  bucket = channel_pending_hash(uuid) % CHANNEL_PENDING_BUCKETS;
+  item->bucket_next = channel_pending_buckets[bucket];
+  channel_pending_buckets[bucket] = item;
+}
+
+static void
+channel_note_pending_services(channel_t *ch, htsmsg_t *list)
+{
+  htsmsg_field_t *f;
+  const char *str;
+
+  if (!list)
+    return;
+  HTSMSG_FOREACH(f, list) {
+    if (!(str = htsmsg_field_get_str(f)))
+      continue;
+    if (idnode_find(str, &service_class, NULL))
+      continue;
+    channel_pending_add(ch, str);
+  }
+}
+
+void
+channel_service_attach(service_t *s)
+{
+  char ubuf[UUID_HEX_SIZE];
+  const char *uuid;
+  channel_pending_t *item, *next;
+  uint32_t bucket;
+  int linked = 0;
+
+  if (!s)
+    return;
+  uuid = idnode_uuid_as_str(&s->s_id, ubuf);
+  bucket = channel_pending_hash(uuid) % CHANNEL_PENDING_BUCKETS;
+  for (item = channel_pending_buckets[bucket]; item; item = next) {
+    next = item->bucket_next;
+    if (strcmp(item->uuid, uuid))
+      continue;
+    /* The saved UUID already exists. Refresh early clients without
+     * rewriting the channel or sending an update for every service. */
+    service_mapper_link(s, item->ch, NULL);
+    channel_service_update_queue(item->ch);
+    channel_pending_unlink(item);
+    linked = 1;
+  }
+  if (linked)
+    channel_link_signal();
+}
+
+channel_t *
+channel_wait_for_service(channel_t *ch)
+{
+  int64_t deadline = getmonoclock() + sec2mono(30);
+  uint32_t id;
+  int seen;
+
+  if (!ch)
+    return NULL;
+  id = channel_get_id(ch);
+  while (ch && !atomic_get(&channel_inputs_loaded_flag)) {
+    if (!tvheadend_is_running() || getmonoclock() >= deadline)
+      break;
+    seen = atomic_get(&channel_link_generation);
+    tvh_mutex_unlock(&global_lock);
+    tvh_mutex_lock(&channel_link_lock);
+    if (atomic_get(&channel_link_generation) == seen &&
+        !atomic_get(&channel_inputs_loaded_flag) &&
+        getmonoclock() < deadline)
+      tvh_cond_timedwait(&channel_link_cond, &channel_link_lock,
+                        MIN(deadline, getmonoclock() + sec2mono(1)));
+    tvh_mutex_unlock(&channel_link_lock);
+    tvh_mutex_lock(&global_lock);
+    ch = channel_find_by_id(id);
+  }
+  return ch;
+}
 
 static void channel_tag_init ( void );
 static void channel_tag_done ( void );
@@ -157,7 +379,13 @@ static const void *
 channel_class_services_get ( void *obj )
 {
   channel_t *ch = obj;
-  return idnode_list_get2(&ch->ch_services);
+  htsmsg_t *list = idnode_list_get2(&ch->ch_services);
+  channel_pending_t *pending;
+
+  /* A service that does not exist yet is still part of the saved channel. */
+  for (pending = ch->ch_pending; pending; pending = pending->ch_next)
+    htsmsg_add_str(list, NULL, pending->uuid);
+  return list;
 }
 
 static char *
@@ -171,9 +399,18 @@ static int
 channel_class_services_set ( void *obj, const void *p )
 {
   channel_t *ch = obj;
-  return idnode_list_set2(&ch->ch_id, &ch->ch_services,
+  int save;
+
+  /* An edit replaces the stored list. Startup keeps UUIDs whose service
+   * object has not been created yet. */
+  if (!channel_in_load)
+    channel_pending_clear(ch);
+  save = idnode_list_set2(&ch->ch_id, &ch->ch_services,
                           &service_class, (htsmsg_t *)p,
                           service_mapper_create);
+  if (channel_in_load)
+    channel_note_pending_services(ch, (htsmsg_t *)p);
+  return save;
 }
 
 static htsmsg_t *
@@ -1344,6 +1581,11 @@ channel_delete ( channel_t *ch, int delconf )
     hts_settings_remove("channel/config/%s", idnode_uuid_as_str(&ch->ch_id, ubuf));
 
   /* Free memory */
+  if (ch->ch_service_update_pending) {
+    LIST_REMOVE(ch, ch_service_update_link);
+    ch->ch_service_update_pending = 0;
+  }
+  channel_pending_clear(ch);
   RB_REMOVE(&channels, ch, ch_link);
   channels_count--;
   idnode_unlink(&ch->ch_id);
@@ -1461,6 +1703,13 @@ channel_init ( void )
   htsmsg_field_t *f;
   channel_t *ch, *parent;
   char *s;
+  int64_t started, loaded;
+
+  if (!channel_link_lock_ready) {
+    tvh_mutex_init(&channel_link_lock, NULL);
+    tvh_cond_init(&channel_link_cond, 1);
+    channel_link_lock_ready = 1;
+  }
 
   channels_count = 0;
   RB_INIT(&channels);
@@ -1472,8 +1721,13 @@ channel_init ( void )
   channel_tag_init();
 
   /* Channels */
-  if (!(c = hts_settings_load("channel/config")))
+  started = getmonoclock();
+  if (!(c = hts_settings_load("channel/config"))) {
+    tvhinfo(LS_MAIN, "startup channels built in %"PRId64" ms (0 channels)",
+            mono2ms(getmonoclock() - started));
     return;
+  }
+  loaded = getmonoclock();
 
   channel_in_load = 1;
   HTSMSG_FOREACH(f, c) {
@@ -1482,6 +1736,9 @@ channel_init ( void )
   }
   channel_in_load = 0;
   hts_settings_free_later(c);
+  tvhinfo(LS_MAIN, "startup channels read in %"PRId64" ms, built in %"PRId64" ms (%d channels)",
+          mono2ms(loaded - started), mono2ms(getmonoclock() - loaded),
+          channels_count);
 
   /* Pair slave EPG, set parent again without channel_in_load */
   CHANNEL_FOREACH(ch)
@@ -1503,6 +1760,7 @@ channel_done ( void )
   channel_t *ch;
 
   tvh_mutex_lock(&global_lock);
+  mtimer_disarm(&channel_service_update_timer);
   while ((ch = RB_FIRST(&channels)) != NULL)
     channel_delete(ch, 0);
   memoryinfo_unregister(&channels_memoryinfo);

@@ -970,8 +970,14 @@ mpegts_service_create0
   tvhdebug(LS_MPEGTS, "%s - add service %04X %s",
            mm->mm_nicename, service_id16(s), s->s_dvb_svcname);
 
-  /* Bouquet */
-  mpegts_network_bouquet_trigger(mn, 1);
+  /* A channel loaded before this service kept the UUID. Link it without
+   * a notification: the saved channel already names this service. */
+  channel_service_attach((service_t *)s);
+
+  /* One bouquet pass after every saved service exists. Arming the timer
+   * once per service walks the timer list tens of thousands of times. */
+  if (channel_inputs_loaded())
+    mpegts_network_bouquet_trigger(mn, 1);
 
   /* Notification */
   idnode_notify_changed(&mm->mm_id);

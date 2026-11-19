@@ -1249,6 +1249,7 @@ static int
 http_exec(http_connection_t *hc, http_path_t *hp, char *remain)
 {
   int err;
+  const char *path = hp->hp_path;
 
   /* this is a special case when client probably requires authentication */
   if ((hp->hp_accessmask & ACCESS_NO_EMPTY_ARGS) != 0 && TAILQ_EMPTY(&hc->hc_req_args)) {
@@ -1265,6 +1266,16 @@ http_exec(http_connection_t *hc, http_path_t *hp, char *remain)
     err = http_websocket_valid(hc);
     if (err)
       goto destroy;
+  }
+  if (tvheadend_webroot)
+    path += strlen(tvheadend_webroot);
+  /* Legacy web routes can change DVR/input state without going through
+   * api_exec. During startup expose only the guarded API, icons and the
+   * channel stream endpoint (which waits for inputs). */
+  if (!channel_inputs_loaded() && strcmp(path, "/api") &&
+      strcmp(path, "/imagecache") && strcmp(path, "/stream")) {
+    err = HTTP_STATUS_SERVICE;
+    goto destroy;
   }
   err = hp->hp_callback(hc, remain, hp->hp_opaque);
 destroy:

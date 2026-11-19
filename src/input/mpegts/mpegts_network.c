@@ -420,6 +420,16 @@ mpegts_network_bouquet_trigger0(mpegts_network_t *mn, int timeout)
                  mn, sec2mono(timeout));
 }
 
+void
+mpegts_network_bouquet_trigger_all(void)
+{
+  mpegts_network_t *mn;
+
+  lock_assert(&global_lock);
+  LIST_FOREACH(mn, &mpegts_network_all, mn_global_link)
+    mpegts_network_bouquet_trigger(mn, 1);
+}
+
 static int
 mpegts_network_bouquet_source
   ( mpegts_network_t *mn, char *source, size_t len)

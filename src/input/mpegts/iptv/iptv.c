@@ -21,6 +21,7 @@
 #include <fcntl.h>
 
 #include "iptv_private.h"
+#include "channels.h"
 #include "tvhpoll.h"
 #include "tcp.h"
 #include "settings.h"
@@ -1103,6 +1104,8 @@ iptv_network_create0
   iptv_network_t *in = calloc(1, sizeof(*in));
   htsmsg_t *c;
   char ubuf[UUID_HEX_SIZE];
+  int64_t started = 0, loaded = 0;
+  size_t mux_count = 0;
 
   /* Init Network */
   in->in_scan_create        = 1;
@@ -1132,9 +1135,20 @@ iptv_network_create0
     in->mn_skipinitscan = 1;
   }
 
-  /* Load muxes */
-  if ((c = hts_settings_load_r(1, "input/iptv/networks/%s/muxes",
-                                idnode_uuid_as_str(&in->mn_id, ubuf)))) {
+  /* Load muxes. The channel list is already being served, so this read
+   * must not keep the global lock: the HTSP dump and the settings API
+   * need it. The database lock stays inside the settings read. */
+  if (!channel_inputs_loaded()) {
+    started = getmonoclock();
+    tvh_mutex_unlock(&global_lock);
+  }
+  c = hts_settings_load_r(1, "input/iptv/networks/%s/muxes",
+                          idnode_uuid_as_str(&in->mn_id, ubuf));
+  if (!channel_inputs_loaded()) {
+    tvh_mutex_lock(&global_lock);
+    loaded = getmonoclock();
+  }
+  if (c) {
     htsmsg_field_t *f, **fields;
     size_t i, count = 0;
     HTSMSG_FOREACH(f, c)
@@ -1148,8 +1162,15 @@ iptv_network_create0
       HTSMSG_FOREACH(f, c)
         fields[count++] = f;
       qsort(fields, count, sizeof(*fields), iptv_network_field_cmp);
-      for (i = 0; i < count; i++)
+      for (i = 0; i < count; i++) {
         iptv_network_load_mux(in, fields[i]);
+        /* Let a waiting channel dump or stream request take the lock. */
+        if (!channel_inputs_loaded() && (i % 128) == 127) {
+          tvh_mutex_unlock(&global_lock);
+          tvh_mutex_lock(&global_lock);
+        }
+      }
+      mux_count = count;
       free(fields);
     } else {
       HTSMSG_FOREACH(f, c)
@@ -1157,6 +1178,9 @@ iptv_network_create0
     }
     hts_settings_free_later(c);
   }
+  if (started && mux_count >= 1000)
+    tvhinfo(LS_MAIN, "startup muxes read in %"PRId64" ms, built in %"PRId64" ms (%zu muxes)",
+            mono2ms(loaded - started), mono2ms(getmonoclock() - loaded), mux_count);
 
   if (idc == &iptv_auto_network_class)
     iptv_auto_network_init(in);

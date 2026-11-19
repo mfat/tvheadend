@@ -32,6 +32,7 @@
 #include "htsmsg_binary2.h"
 #include "htsmsg_json.h"
 #include "settings.h"
+#include "settings_sqlite.h"
 #include "tvheadend.h"
 #include "filebundle.h"
 
@@ -56,6 +57,10 @@ hts_settings_init(const char *confpath)
 {
   if (confpath)
     settingspath = realpath(confpath, NULL);
+  /* A database that is present but cannot be opened must not fall back to
+   * leftover files: those files are no longer the copy being updated. */
+  if (hts_settings_sqlite_init(settingspath))
+    exit(1);
 }
 
 /**
@@ -64,7 +69,9 @@ hts_settings_init(const char *confpath)
 void
 hts_settings_done(void)
 {
+  hts_settings_sqlite_done();
   free(settingspath);
+  settingspath = NULL;
 }
 
 /**
@@ -86,6 +93,8 @@ hts_settings_makedirs ( const char *inpath )
     }
     x--;
   }
+  if (hts_settings_sqlite_active() && hts_settings_sqlite_makedirs(inpath))
+    return -1;
   return makedirs(LS_SETTINGS, path, 0700, 1, -1, -1);
 }
 
@@ -126,6 +135,111 @@ hts_settings_buildpath
 }
 
 /**
+ * Write the same bytes a settings file contains.
+ * Returns 0 on success.
+ */
+static int
+hts_settings_pack(const char *path)
+{
+#if ENABLE_ZLIB
+  return strstr(path, "/muxes/") != NULL && /* ugly, redesign API */
+         strstr(path, "/networks/") != NULL &&
+         strstr(path, "/input/") != NULL;
+#else
+  return 0;
+#endif
+}
+
+static int
+hts_settings_write_record(int fd, htsmsg_t *record, const char *path, const char *what)
+{
+  htsbuf_queue_t hq;
+  htsbuf_data_t *hd;
+
+  if (!hts_settings_pack(path)) {
+    htsbuf_queue_init(&hq, 0);
+    htsmsg_json_serialize(record, &hq, 1);
+    TAILQ_FOREACH(hd, &hq.hq_q, hd_link)
+      if (tvh_write(fd, hd->hd_data + hd->hd_data_off, hd->hd_data_len)) {
+        tvhalert(LS_SETTINGS, "Failed to write \"%s\" - %s",
+                 what, strerror(errno));
+        htsbuf_queue_flush(&hq);
+        return -1;
+      }
+    htsbuf_queue_flush(&hq);
+    return 0;
+  }
+#if ENABLE_ZLIB
+  {
+    void *msgdata = NULL;
+    size_t msglen;
+    int r = htsmsg_binary2_serialize0(record, &msgdata, &msglen, 2*1024*1024);
+    if (!r && msglen >= 4)
+      r = tvh_gzip_deflate_fd_header(fd, msgdata, msglen, NULL, 3, "01");
+    else {
+      tvhalert(LS_SETTINGS, "Unable to pack the configuration data \"%s\"", path);
+      r = -1;
+    }
+    free(msgdata);
+    return r ? -1 : 0;
+  }
+#else
+  return -1;
+#endif
+}
+
+/* Serialize directly into memory for SQLite. This avoids Linux-only memfd
+ * APIs and filesystem work, while retaining the existing JSON/GZIP01 format. */
+static int
+hts_settings_store_record(htsmsg_t *record, const char *path)
+{
+  char *json;
+  int r;
+
+  if (!hts_settings_pack(path)) {
+    json = htsmsg_json_serialize_to_str(record, 1);
+    if (!json)
+      return -1;
+    r = hts_settings_sqlite_put(path, json, strlen(json));
+    free(json);
+    return r;
+  }
+#if ENABLE_ZLIB
+  {
+    void *data = NULL;
+    uint8_t *gzip, *packed;
+    size_t len, size = 0;
+    r = htsmsg_binary2_serialize0(record, &data, &len, 2*1024*1024);
+    if (r || len < 4) {
+      free(data);
+      return -1;
+    }
+    gzip = tvh_gzip_deflate(data, len, &size);
+    free(data);
+    if (!gzip)
+      return -1;
+    packed = malloc(size + 12);
+    if (!packed) {
+      free(gzip);
+      return -1;
+    }
+    memcpy(packed, "\xff\xffGZIP01", 8);
+    packed[8] = (len >> 24) & 0xff;
+    packed[9] = (len >> 16) & 0xff;
+    packed[10] = (len >> 8) & 0xff;
+    packed[11] = len & 0xff;
+    memcpy(packed + 12, gzip, size);
+    free(gzip);
+    r = hts_settings_sqlite_put(path, packed, size + 12);
+    free(packed);
+    return r;
+  }
+#else
+  return -1;
+#endif
+}
+
+/**
  *
  */
 void
@@ -135,9 +249,7 @@ hts_settings_save(htsmsg_t *record, const char *pathfmt, ...)
   char tmppath[PATH_MAX + 4];
   int fd;
   va_list ap;
-  htsbuf_queue_t hq;
-  htsbuf_data_t *hd;
-  int ok, r, pack;
+  int ok, r;
 
   if(settingspath == NULL)
     return;
@@ -147,10 +259,18 @@ hts_settings_save(htsmsg_t *record, const char *pathfmt, ...)
   _hts_settings_buildpath(path, sizeof(path), pathfmt, ap, settingspath);
   va_end(ap);
 
-  /* Create directories */
-  if (hts_settings_makedirs(path)) return;
-
   tvhdebug(LS_SETTINGS, "saving to %s", path);
+
+  /* The database, once selected, is the only copy. Writing the file as
+   * well would make the next startup read whichever copy it opened first. */
+  if (hts_settings_sqlite_active() && hts_settings_sqlite_owns(path)) {
+    if (hts_settings_store_record(record, path))
+      tvhalert(LS_SETTINGS, "Unable to store \"%s\"", path);
+    return;
+  }
+
+  /* Only the file backend needs physical parent directories. */
+  if (hts_settings_makedirs(path)) return;
 
   /* Create tmp file */
   snprintf(tmppath, sizeof(tmppath), "%s.tmp", path);
@@ -160,42 +280,7 @@ hts_settings_save(htsmsg_t *record, const char *pathfmt, ...)
     return;
   }
 
-  /* Store data */
-#if ENABLE_ZLIB
-  pack = strstr(path, "/muxes/") != NULL && /* ugly, redesign API */
-         strstr(path, "/networks/") != NULL &&
-         strstr(path, "/input/") != NULL;
-#else
-  pack = 0;
-#endif
-  ok = 1;
-
-  if (!pack) {
-    htsbuf_queue_init(&hq, 0);
-    htsmsg_json_serialize(record, &hq, 1);
-    TAILQ_FOREACH(hd, &hq.hq_q, hd_link)
-      if(tvh_write(fd, hd->hd_data + hd->hd_data_off, hd->hd_data_len)) {
-        tvhalert(LS_SETTINGS, "Failed to write file \"%s\" - %s",
-                 tmppath, strerror(errno));
-        ok = 0;
-        break;
-      }
-    htsbuf_queue_flush(&hq);
-  } else {
-#if ENABLE_ZLIB
-    void *msgdata = NULL;
-    size_t msglen;
-    r = htsmsg_binary2_serialize0(record, &msgdata, &msglen, 2*1024*1024);
-    if (!r && msglen >= 4) {
-      r = tvh_gzip_deflate_fd_header(fd, msgdata, msglen, NULL, 3, "01");
-      if (r)
-        ok = 0;
-    } else {
-      tvhalert(LS_SETTINGS, "Unable to pack the configuration data \"%s\"", path);
-    }
-    free(msgdata);
-#endif
-  }
+  ok = hts_settings_write_record(fd, record, path, tmppath) == 0;
   close(fd);
 
   /* Move */
@@ -382,6 +467,9 @@ hts_settings_load_path(const char *fullpath, int depth)
   htsmsg_t *r, *c, **loaded;
   int n, i;
 
+  if (hts_settings_sqlite_active() && hts_settings_sqlite_owns(fullpath))
+    return hts_settings_sqlite_load(fullpath, depth);
+
   /* Invalid */
   if (fb_stat(fullpath, &st)) return NULL;
 
@@ -504,6 +592,8 @@ hts_settings_remove(const char *pathfmt, ...)
   _hts_settings_buildpath(fullpath, sizeof(fullpath),
                           pathfmt, ap, settingspath);
   va_end(ap);
+  if (hts_settings_sqlite_active() && hts_settings_sqlite_owns(fullpath))
+    hts_settings_sqlite_remove(fullpath);
   if (stat(fullpath, &st) == 0) {
     if (S_ISDIR(st.st_mode))
       rmtree(fullpath);
@@ -557,6 +647,9 @@ hts_settings_exists ( const char *pathfmt, ... )
   _hts_settings_buildpath(path, sizeof(path), pathfmt, ap, settingspath);
   va_end(ap);
 
+  if (hts_settings_sqlite_active() && hts_settings_sqlite_owns(path) &&
+      hts_settings_sqlite_exists(path))
+    return 1;
   return (stat(path, &st) == 0);
 }
 

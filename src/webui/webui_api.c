@@ -56,6 +56,9 @@ destroy_args:
       r = ENOSYS;
     }
     switch (r) {
+      case EBUSY:
+        r = HTTP_STATUS_SERVICE;
+        break;
       case EPERM:
       case EACCES:
         r = http_noaccess_code(hc);

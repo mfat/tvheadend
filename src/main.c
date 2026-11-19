@@ -54,6 +54,7 @@
 #include "avahi.h"
 #include "bonjour.h"
 #include "input.h"
+#include "channels.h"
 #include "service.h"
 #include "trap.h"
 #include "settings.h"
@@ -1328,17 +1329,9 @@ main(int argc, char **argv)
   tvhftrace(LS_MAIN, service_init);
   tvhftrace(LS_MAIN, descrambler_init);
   tvhftrace(LS_MAIN, dvb_init);
-#if ENABLE_MPEGTS
-#if ENABLE_TSFILE || ENABLE_TSDEBUG
-  TVH_STARTUP("mpegts_init", mpegts_init, adapter_mask, opt_nosatipcli, &opt_satip_xml,
-            &opt_tsfile, opt_tsfile_tuner);
-#else
-  TVH_STARTUP("mpegts_init", mpegts_init, adapter_mask, opt_nosatipcli, &opt_satip_xml,
-            NULL, 0);
-#endif
-#endif
+  /* Channels do not need the mux objects. Their service UUIDs are kept
+   * and linked while the inputs load, so the list can be served first. */
   TVH_STARTUP("channel_init", channel_init);
-  TVH_STARTUP("bouquet_service_resolve", bouquet_service_resolve);
   tvhftrace(LS_MAIN, subscription_init);
   tvhftrace(LS_MAIN, dvr_config_init);
   tvhftrace(LS_MAIN, access_init, opt_firstrun, opt_noacl);
@@ -1352,13 +1345,28 @@ main(int argc, char **argv)
   tvhftrace(LS_MAIN, upnp_server_init, opt_bindaddr);
 #endif
   tvhftrace(LS_MAIN, service_mapper_init);
-  TVH_STARTUP("epggrab_init", epggrab_init);
-  TVH_STARTUP("epg_init", epg_init);
-  tvhftrace(LS_MAIN, dvr_init);
   tvhftrace(LS_MAIN, dbus_server_start);
   tvhftrace(LS_MAIN, http_server_register);
-  tvhftrace(LS_MAIN, satip_server_register);
   TVH_STARTUP("htsp_register", htsp_register);
+  tvhinfo(LS_MAIN, "startup channel list is available");
+#if ENABLE_MPEGTS
+#if ENABLE_TSFILE || ENABLE_TSDEBUG
+  TVH_STARTUP("mpegts_init", mpegts_init, adapter_mask, opt_nosatipcli, &opt_satip_xml,
+            &opt_tsfile, opt_tsfile_tuner);
+#else
+  TVH_STARTUP("mpegts_init", mpegts_init, adapter_mask, opt_nosatipcli, &opt_satip_xml,
+            NULL, 0);
+#endif
+  mpegts_network_bouquet_trigger_all();
+#endif
+  TVH_STARTUP("bouquet_service_resolve", bouquet_service_resolve);
+  TVH_STARTUP("epggrab_init", epggrab_init);
+  TVH_STARTUP("epg_init", epg_init);
+  /* Saved DVR entries resolve broadcast IDs and purge obsolete autorecs.
+   * They must see the restored EPG before clients can change schedules. */
+  tvhftrace(LS_MAIN, dvr_init);
+  tvhftrace(LS_MAIN, satip_server_register);
+  channel_inputs_loaded_set(1);
 #undef TVH_STARTUP
 
   if(opt_subscribe != NULL)

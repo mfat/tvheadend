@@ -35,6 +35,7 @@
 #include "intlconv.h"
 #if ENABLE_MPEGTS
 #include "input.h"
+#include "channels.h"
 #endif
 #if ENABLE_SATIP_SERVER
 #include "satip/server.h"
@@ -1705,6 +1706,17 @@ do_stream(http_connection_t *hc, const char *remain, void *opaque, int isUdp)
     // TODO: do we want to be able to force starting a particular instance
     mm = mpegts_mux_find(components[1]);
 #endif
+  }
+
+  /* The channel list is served before muxes exist. Wait for this channel's
+   * service instead of failing the stream that starts as soon as the list
+   * is shown. */
+  if (ch && !channel_inputs_loaded())
+    ch = channel_wait_for_service(ch);
+
+  if (!channel_inputs_loaded()) {
+    tvh_mutex_unlock(&global_lock);
+    return HTTP_STATUS_SERVICE;
   }
 
   if(ch != NULL) {

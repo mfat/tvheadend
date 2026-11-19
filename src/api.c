@@ -20,6 +20,7 @@
 #include "tvheadend.h"
 #include "api.h"
 #include "access.h"
+#include "channels.h"
 
 #include <string.h>
 
@@ -93,6 +94,17 @@ api_exec ( access_t *perm, const char *subsystem,
   if (access_verify2(perm, access & ~ACCESS_INTERNAL))
     return EPERM;
 
+  /* Input loading yields global_lock while holding partially built objects.
+   * Only the early channel snapshot is safe until startup has completed.
+   * This also covers API requests tunneled through HTSP. */
+  if (!channel_inputs_loaded() &&
+      strcmp(subsystem, "serverinfo") &&
+      strcmp(subsystem, "channel/list") &&
+      strcmp(subsystem, "channel/grid") &&
+      strcmp(subsystem, "channeltag/list") &&
+      strcmp(subsystem, "channeltag/grid"))
+    return EBUSY;
+
   /* Extract method */
   op = htsmsg_get_str(args, "method");
   if (!op)
@@ -111,6 +123,7 @@ api_serverinfo
   htsmsg_add_str(*resp, "sw_version",   tvheadend_version);
   htsmsg_add_u32(*resp, "api_version",  TVH_API_VERSION);
   htsmsg_add_str(*resp, "name",         "Tvheadend");
+  htsmsg_add_bool(*resp, "inputs_loaded", channel_inputs_loaded());
   if (tvheadend_webroot)
     htsmsg_add_str(*resp, "webroot",      tvheadend_webroot);
   htsmsg_add_msg(*resp, "capabilities", tvheadend_capabilities_list(1));
